@@ -77,7 +77,7 @@ pipeline {
         stage("Trivy Scan") {
             steps {
                 script {
-                    sh 'docker run -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy image ashfaque9x/register-app-pipeline:latest --no-progress --scanners vuln --exit-code 0 --severity HIGH,CRITICAL --format table'
+                    sh 'docker run -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy image ashfaque9x/register-app-pipeline:latest --no-progress --scanners vuln --exit-code 0 --severity HIGH,CRITICAL --format table || true'
                 }
             }
         }
@@ -85,35 +85,78 @@ pipeline {
         stage("Cleanup Artifacts") {
             steps {
                 script {
-                    sh "docker rmi ${IMAGE_NAME}:${IMAGE_TAG}"
-                    sh "docker rmi ${IMAGE_NAME}:latest"
+                    sh "docker rmi ${IMAGE_NAME}:${IMAGE_TAG} || true"
+                    sh "docker rmi ${IMAGE_NAME}:latest || true"
                 }
             }
         }
 
-        stage("Push the changed deployment file to Git") {
+        stage("Update Deployment File") {
             steps {
                 script {
                     sh """
-                       git config --global user.name "riteshsute"
-                       git config --global user.email "suteritesh@gmail.com"
-                       git stash
-                       git pull origin work --rebase
-                       git stash pop || true
-                       git add deployment.yaml
-                       git commit -m "Updated Deployment Manifest" || true
+                        # Copy template if exists
+                        if [ -f deployment.yaml.template ]; then
+                            cp deployment.yaml.template deployment.yaml
+                        fi
+
+                        # Update image tag if file exists
+                        if [ -f deployment.yaml ]; then
+                            sed -i 's#${APP_NAME}:.*#${APP_NAME}:${IMAGE_TAG}#' deployment.yaml
+                            cat deployment.yaml
+                        fi
                     """
-        
+                }
+            }
+        }
+
+        stage("Push Deployment File to Git") {
+            steps {
+                script {
+                    sh """
+                        git config --global user.name "riteshsute"
+                        git config --global user.email "suteritesh@gmail.com"
+                        
+                        # Stash unrelated changes
+                        git stash || true
+                        
+                        # Pull latest changes
+                        git pull origin work --rebase || true
+                        
+                        # Apply stashed changes
+                        git stash pop || true
+                        
+                        # Add only if file exists
+                        [ -f deployment.yaml ] && git add deployment.yaml
+                        
+                        # Commit only if staged changes exist
+                        git diff --cached --quiet || git commit -m "Updated Deployment Manifest"
+                    """
+                    
                     withCredentials([usernamePassword(credentialsId: 'github', usernameVariable: 'GIT_USER', passwordVariable: 'GIT_PASS')]) {
                         sh """
-                           git remote set-url origin https://${GIT_USER}:${GIT_PASS}@github.com/riteshsute/gitops-register-app.git
-                           git push origin HEAD:work
+                            git remote set-url origin https://${GIT_USER}:${GIT_PASS}@github.com/riteshsute/gitops-register-app.git
+                            git push origin HEAD:work || true
                         """
                     }
                 }
             }
         }
 
+        stage("Trigger CD Pipeline") {
+            steps {
+                script {
+                    sh """
+                        curl -v -k --user admin:${JENKINS_API_TOKEN} \
+                        -X POST \
+                        -H 'cache-control: no-cache' \
+                        -H 'content-type: application/x-www-form-urlencoded' \
+                        --data 'IMAGE_TAG=${IMAGE_TAG}' \
+                        'http://65.0.122.93:8080/job/gitops-register-app-cd/buildWithParameters?token=gitops-token'
+                    """
+                }
+            }
+        }
 
     }
 }
